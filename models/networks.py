@@ -1533,6 +1533,41 @@ class MambaLayer(nn.Module):
             x = x * torch.sigmoid(z)
             return self.out_proj(x)
 
+# --------------------------------------------------------------------------
+
+class LayerNorm2d(nn.Module):
+    def __init__(self, channels):
+        super(LayerNorm2d, self).__init__()
+        self.norm = nn.LayerNorm(channels)
+
+    def forward(self, x):
+        # 将 (B, C, H, W) 转换为 (B, H, W, C) 后做 LayerNorm，再转回 (B, C, H, W)
+        return self.norm(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
+
+
+#  3D Attention 
+
+class SimAM(torch.nn.Module):
+    def __init__(self, channels=None, e_lambda=1e-4):
+        super(SimAM, self).__init__()
+        self.activaton = nn.Sigmoid()
+        self.e_lambda = e_lambda
+
+    def __repr__(self):
+        s = self.__class__.__name__ + '('
+        s += ('lambda=%f)' % self.e_lambda)
+        return s
+
+    @staticmethod
+    def get_module_name():
+        return "simam"
+
+    def forward(self, x):
+        b, c, h, w = x.size()
+        n = w * h - 1
+        x_minus_mu_square = (x - x.mean(dim=[2, 3], keepdim=True)).pow(2)
+        y = x_minus_mu_square / (4 * (x_minus_mu_square.sum(dim=[2, 3], keepdim=True) / n + self.e_lambda)) + 0.5
+        return x * self.activaton(y) + x
 
 
 # --------------------------------------------------------------------------
@@ -1554,6 +1589,8 @@ class Downsample_Subpixel(nn.Module):
 class VSSM_Block(nn.Module):
     def __init__(self, in_channels, d_state=16):
         super(VSSM_Block, self).__init__()
+        self.norm1 = LayerNorm2d(in_channels) # F_in 之后的 LayerNorm
+        
         self.linear_in = nn.Conv2d(in_channels, in_channels, 1)
         self.dw_conv = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels)
         self.silu = nn.SiLU()
@@ -1563,21 +1600,44 @@ class VSSM_Block(nn.Module):
         self.silu_gate = nn.SiLU()
         self.linear_out = nn.Conv2d(in_channels, in_channels, 1)
 
-    def forward(self, x):
-        identity = x
-        x_main = self.silu(self.dw_conv(self.linear_in(x)))
+        self.norm2 = LayerNorm2d(in_channels) 
+        
+        self.conv_attn = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels)
+        self.simam = SimAM()
+
+    def forward(self, f_in):
+        # ==========================================================
+        # Branch 1: F_in -> LayerNorm -> VSSM -> F_out
+        # ==========================================================
+        x_norm1 = self.norm1(f_in) 
+        
+        x_main = self.silu(self.dw_conv(self.linear_in(x_norm1)))
         B, C, H, W = x_main.shape
         v1 = x_main.permute(0, 2, 3, 1).reshape(B, -1, C)
         v2 = torch.flip(v1, dims=[1])
         v3 = x_main.permute(0, 3, 2, 1).reshape(B, -1, C)
         v4 = torch.flip(v3, dims=[1])
+        
         y1, y2, y3, y4 = self.ssm(v1), self.ssm(v2), self.ssm(v3), self.ssm(v4)
+        
         y1 = y1.reshape(B, H, W, C).permute(0, 3, 1, 2)
         y2 = torch.flip(y2, dims=[1]).reshape(B, H, W, C).permute(0, 3, 1, 2)
         y3 = y3.reshape(B, W, H, C).permute(0, 3, 2, 1)
         y4 = torch.flip(y4, dims=[1]).reshape(B, W, H, C).permute(0, 3, 2, 1)
+        
         out = self.norm((y1 + y2 + y3 + y4).permute(0, 2, 3, 1)).permute(0, 3, 1, 2)
-        return self.linear_out(out * self.silu(self.linear_gate(x))) + identity
+        vssm_out = self.linear_out(out * self.silu(self.linear_gate(x_norm1)))
+        
+        f_out = f_in + vssm_out
+
+        # ==========================================================
+        # Branch 2: F_out -> LayerNorm -> Depthwise Conv -> 3D Attention
+        # ==========================================================
+        attn_branch = self.simam(self.conv_attn(self.norm2(f_out)))
+        
+        f_out_mamba = f_out + attn_branch
+        
+        return f_out_mamba
 
 
 class ConvBlock(nn.Module):
@@ -1615,6 +1675,7 @@ class MambaFusionNode(nn.Module):
             nn.InstanceNorm2d(out_channels, affine=True),
             nn.ReLU(inplace=True)
         ) if in_channels != out_channels else nn.Identity()
+        
         self.mamba = VSSM_Block(out_channels, d_state=d_state)
 
     def forward(self, x): return self.mamba(self.project(x))
@@ -1630,7 +1691,6 @@ class ResidualBlock(nn.Module):
         self.bn2 = nn.InstanceNorm2d(in_channels, affine=True)
 
     def forward(self, x): return self.relu(self.bn2(self.conv2(self.relu(self.bn1(self.conv1(x))))) + x)
-
 
 
 # --------------------------------------------------------------------------
@@ -1656,7 +1716,7 @@ class GatedSkipConnection(nn.Module):
 # --------------------------------------------------------------------------
 
 class UNet_3Plus_Mamba_DeepSup(nn.Module):
-    def __init__(self, in_channels=3, n_classes=3, deep_supervision=True, dropout_skip=0.1):
+    def __init__(self, in_channels=3, n_classes=3, deep_supervision=True, dropout_skip=0.01):
         super(UNet_3Plus_Mamba_DeepSup, self).__init__()
         self.deep_supervision = deep_supervision
         self.filters = [64, 128, 256, 512, 1024]
@@ -1788,7 +1848,7 @@ class UNet_3Plus_Mamba_DeepSup(nn.Module):
         X_En_5 = self.X_En_5(self.down_4_5(X_En_4))
 
         # ===============================================================
-        # [Feature Extraction] Used for contrastive loss (extracts pure features unperturbed by the decoder)
+        # [Feature Extraction] Used for CUT contrastive loss 
         # ===============================================================
         if encode_only:
             all_feats = [inputs, X_En_1, X_En_2, X_En_3, X_En_4, X_En_5]
@@ -1801,7 +1861,7 @@ class UNet_3Plus_Mamba_DeepSup(nn.Module):
             else:
                 return all_feats
 
-        # 3. Nested Nodes (Apply gating mechanism)
+        # 3. Nested Nodes
         X_0_1 = self.X_0_1(torch.cat([self.gate_En1_to_01(X_En_1), self._up_bicubic(X_En_2, 2)], 1))
         X_1_1 = self.X_1_1(torch.cat([self.gate_En2_to_11(X_En_2), self._up_bicubic(X_En_3, 2)], 1))
         X_2_1 = self.X_2_1(torch.cat([self.gate_En3_to_21(X_En_3), self._up_bicubic(X_En_4, 2)], 1))
@@ -1810,8 +1870,7 @@ class UNet_3Plus_Mamba_DeepSup(nn.Module):
         X_1_2 = self.X_1_2(torch.cat([X_En_2, X_1_1, self._up_bicubic(X_2_1, 2)], 1))
         X_0_3 = self.X_0_3(torch.cat([X_En_1, X_0_1, X_0_2, self._up_bicubic(X_1_2, 2)], 1))
 
-        # 4. Decoder Fusion (Apply gating mechanism)
-        
+        # 4. Decoder Fusion
         # X_De_4
         h1 = self.gate_En1_to_De4(self.conv_En1_to_De4(X_En_1))
         h2 = self.gate_En2_to_De4(self.conv_En2_to_De4(X_En_2))
@@ -1848,7 +1907,7 @@ class UNet_3Plus_Mamba_DeepSup(nn.Module):
         x_out = self.outro_shuffle(self.outro_up(X_De_1))
         head = self.head_identity(inputs)
 
-        # Global residual learning: Refine(Skip + Decode)
+        # Global residual learning
         x_final = self.global_refine(head + x_out)
 
         if self.deep_supervision:
