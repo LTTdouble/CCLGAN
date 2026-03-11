@@ -17,7 +17,7 @@ class CUTModel(BaseModel):
         parser.add_argument('--nce_idt', type=util.str2bool, nargs='?', const=True, default=False,
                             help='use NCE loss for identity mapping: NCE(G(Y), Y))')
 
-        parser.add_argument('--nce_layers', type=str, default='0,2,3,4,5', help='compute NCE loss on which layers')
+        parser.add_argument('--nce_layers', type=str, default='0,2,3,4', help='compute NCE loss on which layers')
 
         parser.add_argument('--nce_includes_all_negatives_from_minibatch',
                             type=util.str2bool, nargs='?', const=True, default=False,
