@@ -1788,7 +1788,7 @@ class UNet_3Plus_Mamba_DeepSup(nn.Module):
         X_En_5 = self.X_En_5(self.down_4_5(X_En_4))
 
         # ===============================================================
-        # [Feature Extraction] Used for CUT contrastive loss (extracts pure features unperturbed by the decoder)
+        # [Feature Extraction] Used for contrastive loss (extracts pure features unperturbed by the decoder)
         # ===============================================================
         if encode_only:
             all_feats = [inputs, X_En_1, X_En_2, X_En_3, X_En_4, X_En_5]
