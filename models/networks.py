@@ -1716,7 +1716,7 @@ class GatedSkipConnection(nn.Module):
 # --------------------------------------------------------------------------
 
 class UNet_3Plus_Mamba_DeepSup(nn.Module):
-    def __init__(self, in_channels=3, n_classes=3, deep_supervision=True, dropout_skip=0.1):
+    def __init__(self, in_channels=3, n_classes=3, deep_supervision=True, dropout_skip=0.05):
         super(UNet_3Plus_Mamba_DeepSup, self).__init__()
         self.deep_supervision = deep_supervision
         self.filters = [64, 128, 256, 512, 1024]
