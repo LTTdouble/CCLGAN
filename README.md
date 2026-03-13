@@ -55,5 +55,5 @@ If you use this code for your research, please cite the paper.
 
 Acknowledgments
 
-Our code is developed based on Contrastive Unpaired Translation (CUT). We thank the authors for their excellent work and for providing the foundational framework.
+Our code is developed based on Contrastive Learning for Unpaired Image-to-Image Translation (CUT), https://github.com/taesungp/contrastive-unpaired-translation. We thank the authors for their excellent work and for providing the foundational framework.
 
